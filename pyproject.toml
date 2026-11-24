@@ -17,6 +17,9 @@ dependencies = [
 dev = ["pytest>=8.0"]
 training = ["torch>=2.5"]
 
+[project.scripts]
+flora-uci = "flora.uci:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
