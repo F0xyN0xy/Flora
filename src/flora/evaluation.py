@@ -1,4 +1,7 @@
-"""A small, transparent classical evaluation function."""
+"""A small, transparent classical evaluation function.
+
+Keep this function cheap: search calls it at a very large number of leaf nodes.
+"""
 
 from __future__ import annotations
 
@@ -15,11 +18,7 @@ PIECE_VALUES = {
 
 
 def evaluate(board: chess.Board) -> int:
-    """Evaluate a position in centipawns from the side-to-move perspective.
-
-    This intentionally simple baseline combines material with a few positional
-    terms. It is not a trained evaluation function.
-    """
+    """Evaluate a position in centipawns from the side-to-move perspective."""
     if board.is_checkmate():
         return -100_000
     if board.is_game_over(claim_draw=True):
@@ -47,7 +46,7 @@ def evaluate(board: chess.Board) -> int:
 
         white_score += sign * (value + positional)
 
-    # A small mobility term rewards positions with more legal options.
-    mobility = board.legal_moves.count()
-    white_score += (mobility if board.turn == chess.WHITE else -mobility)
+    # Deliberately no legal-move mobility count here. Generating legal moves
+    # inside every leaf evaluation is expensive and search already generates
+    # moves at interior nodes.
     return white_score if board.turn == chess.WHITE else -white_score
