@@ -18,6 +18,7 @@ class _Node:
     visits: int = 0
     value_sum: float = 0.0
     virtual_visits: int = 0
+    pending: bool = False
     expanded: bool = False
     children: dict[chess.Move, "_Node"] = field(default_factory=dict)
 
@@ -87,7 +88,10 @@ class MCTS:
 
     def _select_child(self, node: _Node) -> tuple[chess.Move, _Node]:
         scale = math.sqrt(max(1, node.visits + node.virtual_visits))
-        return max(node.children.items(), key=lambda item: (
+        candidates = [(move, child) for move, child in node.children.items() if not child.pending]
+        if not candidates:
+            candidates = list(node.children.items())
+        return max(candidates, key=lambda item: (
             -((item[1].value_sum - item[1].virtual_visits) / max(1, item[1].visits + item[1].virtual_visits))
             + self.c_puct * item[1].prior * scale / (1 + item[1].visits + item[1].virtual_visits)
         ))
@@ -96,6 +100,7 @@ class MCTS:
     def _backpropagate(path: list[_Node], value: float) -> None:
         for node in reversed(path):
             node.virtual_visits = max(0, node.virtual_visits - 1)
+            node.pending = False
             node.visits += 1
             node.value_sum += value
             value = -value
@@ -132,6 +137,7 @@ class MCTS:
                     terminal.append((path, self._terminal_value(current_board)))
                 else:
                     pending.append((path, current_board))
+                path[-1].pending = True
                 for item in path:
                     item.virtual_visits += 1
 
