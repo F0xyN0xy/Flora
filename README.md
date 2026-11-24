@@ -10,6 +10,7 @@
 - PyTorch residual policy/value network
 - PUCT Monte Carlo Tree Search with batched neural inference
 - Self-play game generation with MCTS visit-count policy targets
+- PGN game importer for supervised policy/value pretraining
 - Compressed NPZ training datasets
 - Policy KL-divergence and value mean-squared-error training
 - Classical alpha-beta search baseline and UCI protocol
@@ -42,13 +43,35 @@ python -m flora.selfplay --checkpoint checkpoints/flora.pt --games 10 --simulati
 
 Self-play games stop at the normal game-ending rules or the configured maximum ply count. Games truncated by the ply limit are labelled as draws, so increase the limit for serious data generation.
 
+## Supervised pretraining from PGN
+
+Place one or more `.pgn` files in a folder, or provide a single PGN file:
+
+```powershell
+python -m flora.pgn --input data/pgn --output data/pgn_training.npz
+```
+
+For a small test, limit the import:
+
+```powershell
+python -m flora.pgn --input data/games.pgn --max-games 100 --max-plies 100 --output data/pgn_training.npz
+```
+
+Only games with a known result (`1-0`, `0-1`, or `1/2-1/2`) are included. The played move is the policy target; the final game result is the value target from the side-to-move perspective. This is basic outcome-supervised learning, not an engine evaluation label.
+
 ## Train a network
 
 ```powershell
-python -m flora.train --data data/selfplay.npz --epochs 5 --batch-size 32 --device cuda --output checkpoints/flora.pt
+python -m flora.train --data data/pgn_training.npz --epochs 5 --batch-size 32 --device cuda --output checkpoints/flora.pt
 ```
 
-Training currently initializes a fresh network. It does not yet resume optimizer state or fine-tune an existing checkpoint. The current pipeline is an initial research implementation, not a complete AlphaZero training loop.
+To initialize from an existing Flora model and fine-tune its weights:
+
+```powershell
+python -m flora.train --data data/pgn_training.npz --checkpoint checkpoints/previous.pt --epochs 5 --device cuda --output checkpoints/flora_finetuned.pt
+```
+
+This resumes model weights, but currently starts a fresh optimizer; optimizer state and training epoch are not resumed.
 
 ## Run the classical UCI baseline
 
