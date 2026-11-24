@@ -106,8 +106,15 @@ class UCIEngine:
             limits: dict[str, float | int] = {}
             tokens = parts[1:]
             for i, token in enumerate(tokens[:-1]):
-                if token in ("depth", "movetime", "nodes"):
+                if token in ("depth", "movetime", "nodes", "wtime", "btime", "winc", "binc"):
                     limits[token] = float(tokens[i + 1]) if token == "movetime" else int(tokens[i + 1])
+            if "movetime" not in limits:
+                clock_key = "wtime" if self.board.turn == chess.WHITE else "btime"
+                inc_key = "winc" if self.board.turn == chess.WHITE else "binc"
+                if clock_key in limits:
+                    remaining = max(1, int(limits[clock_key]))
+                    increment = int(limits.get(inc_key, 0))
+                    limits["movetime"] = max(10, min(remaining // 2, remaining // 30 + increment * 4 // 5))
             self._start_search(limits)
         elif name == "stop":
             self._stop_worker()
