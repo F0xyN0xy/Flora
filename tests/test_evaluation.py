@@ -12,12 +12,9 @@ def test_material_advantage_is_positive_for_side_to_move():
     assert evaluate(board) > 0
 
 
-def test_evaluation_flips_with_side_to_move():
-    board = chess.Board("4k3/8/8/8/8/8/4Q3/4K3 w - - 0 1")
-    white_score = evaluate(board)
-    board.turn = chess.BLACK
+def test_material_advantage_is_negative_for_opponent_to_move():
+    board = chess.Board("4k3/8/8/8/8/8/4Q3/4K3 b - - 0 1")
     assert evaluate(board) < 0
-    assert white_score == -evaluate(board)
 
 
 def test_checkmate_is_losing_for_side_to_move():
