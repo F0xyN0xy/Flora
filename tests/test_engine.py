@@ -15,7 +15,7 @@ def test_search_returns_a_legal_move_and_does_not_mutate_board():
 
 
 def test_search_finds_mate_in_one():
-    board = chess.Board("6k1/5ppp/8/8/8/8/5PPP/6KQ w - - 0 1")
+    board = chess.Board("7k/6pp/5KQ1/8/8/8/8/8 w - - 0 1")
     result = Searcher().search(board, max_depth=3)
     assert result.best_move in board.legal_moves
     after = board.copy()
