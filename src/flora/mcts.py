@@ -135,10 +135,14 @@ class MCTS:
 
         root_board = board.copy()
         root = _Node()
-        self._expand(root, root_board)
+        initial_value = self._expand(root, root_board)
 
         if not root.children:
-            return SearchResult(best_move=None, visit_counts={}, root_value=0.0)
+            return SearchResult(
+                best_move=None,
+                visit_counts={},
+                root_value=initial_value,
+            )
 
         for _ in range(simulations):
             current_board = root_board.copy()
