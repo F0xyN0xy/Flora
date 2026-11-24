@@ -49,5 +49,5 @@ def evaluate(board: chess.Board) -> int:
 
     # A small mobility term rewards positions with more legal options.
     mobility = board.legal_moves.count()
-    white_score += (mobility if board.turn == chess.WHITE else -mobility) * 2
+    white_score += (mobility if board.turn == chess.WHITE else -mobility)
     return white_score if board.turn == chess.WHITE else -white_score
