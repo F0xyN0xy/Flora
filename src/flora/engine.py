@@ -40,7 +40,7 @@ class _SearchStopped(Exception):
 
 
 class Searcher:
-    """A readable alpha-beta engine with quiescence and a transposition table."""
+    """Alpha-beta search with iterative deepening, quiescence and a TT."""
 
     def __init__(self) -> None:
         self.nodes = 0
@@ -49,6 +49,8 @@ class Searcher:
         self.deadline: float | None = None
         self.node_limit: int | None = None
         self.info_callback: Callable[[SearchInfo], None] | None = None
+        self.killers: dict[int, list[chess.Move]] = {}
+        self.history: dict[tuple[bool, chess.Move], int] = {}
 
     @staticmethod
     def _key(board: chess.Board) -> tuple:
@@ -70,23 +72,51 @@ class Searcher:
             self.stop_event.set()
             raise _SearchStopped
 
+    def _move_order_score(
+        self,
+        board: chess.Board,
+        move: chess.Move,
+        tt_move: chess.Move | None,
+        ply: int,
+    ) -> int:
+        if move == tt_move:
+            return 2_000_000
+        if move.promotion:
+            return 1_000_000 + move.promotion * 100
+        if board.is_capture(move):
+            victim = chess.PAWN if board.is_en_passant(move) else board.piece_type_at(move.to_square)
+            attacker = board.piece_type_at(move.from_square)
+            return 100_000 + 10 * PIECE_ORDER_VALUE.get(victim, 0) - PIECE_ORDER_VALUE.get(attacker, 0)
+        killers = self.killers.get(ply, [])
+        if killers and move == killers[0]:
+            return 90_000
+        if len(killers) > 1 and move == killers[1]:
+            return 80_000
+        return self.history.get((board.turn, move), 0)
+
     def _ordered_moves(
-        self, board: chess.Board, tt_move: chess.Move | None = None
+        self,
+        board: chess.Board,
+        tt_move: chess.Move | None = None,
+        ply: int = 0,
+        moves: list[chess.Move] | None = None,
     ) -> list[chess.Move]:
-        def score(move: chess.Move) -> int:
-            if move == tt_move:
-                return 1_000_000
-            value = 0
-            if board.is_capture(move):
-                victim = board.piece_type_at(move.to_square)
-                if board.is_en_passant(move):
-                    victim = chess.PAWN
-                attacker = board.piece_type_at(move.from_square)
-                value += 10_000 + 10 * (victim or 0) - (attacker or 0)
-            if move.promotion:
-                value += 8_000 + move.promotion
-            return value
-        return sorted(board.legal_moves, key=score, reverse=True)
+        candidates = list(board.legal_moves) if moves is None else moves
+        candidates.sort(
+            key=lambda move: self._move_order_score(board, move, tt_move, ply),
+            reverse=True,
+        )
+        return candidates
+
+    def _record_quiet_cutoff(self, board: chess.Board, move: chess.Move, ply: int, depth: int) -> None:
+        if board.is_capture(move) or move.promotion:
+            return
+        killers = self.killers.setdefault(ply, [])
+        if not killers or killers[0] != move:
+            killers.insert(0, move)
+            del killers[2:]
+        key = (board.turn, move)
+        self.history[key] = min(1_000_000, self.history.get(key, 0) + depth * depth)
 
     def _quiescence(self, board: chess.Board, alpha: int, beta: int, ply: int) -> int:
         self.nodes += 1
@@ -97,22 +127,25 @@ class Searcher:
             return 0
 
         in_check = board.is_check()
-        stand_pat = evaluate(board)
         if not in_check:
+            stand_pat = evaluate(board)
             if stand_pat >= beta:
                 return beta
             alpha = max(alpha, stand_pat)
+            legal_moves = list(board.legal_moves)
+            moves = [
+                move for move in legal_moves
+                if board.is_capture(move) or move.promotion
+            ]
+        else:
+            moves = list(board.legal_moves)
 
-        moves = list(board.legal_moves) if in_check else [
-            move for move in board.legal_moves
-            if board.is_capture(move) or move.promotion
-        ]
-        for move in self._ordered_moves(board):
-            if move not in moves:
-                continue
+        for move in self._ordered_moves(board, ply=ply, moves=moves):
             board.push(move)
-            score = -self._quiescence(board, -beta, -alpha, ply + 1)
-            board.pop()
+            try:
+                score = -self._quiescence(board, -beta, -alpha, ply + 1)
+            finally:
+                board.pop()
             if score >= beta:
                 return beta
             alpha = max(alpha, score)
@@ -131,6 +164,7 @@ class Searcher:
             return self._quiescence(board, alpha, beta, ply), []
 
         original_alpha = alpha
+        original_beta = beta
         key = self._key(board)
         entry = self.table.get(key)
         tt_move = entry[3] if entry else None
@@ -148,19 +182,22 @@ class Searcher:
         best_score = -INF
         best_move = None
         best_pv: list[chess.Move] = []
-        for move in self._ordered_moves(board, tt_move):
+        for move in self._ordered_moves(board, tt_move, ply):
             board.push(move)
-            score, child_pv = self._negamax(board, depth - 1, -beta, -alpha, ply + 1)
-            board.pop()
+            try:
+                score, child_pv = self._negamax(board, depth - 1, -beta, -alpha, ply + 1)
+            finally:
+                board.pop()
             score = -score
             if score > best_score:
                 best_score, best_move = score, move
                 best_pv = [move, *child_pv]
             alpha = max(alpha, score)
             if alpha >= beta:
+                self._record_quiet_cutoff(board, move, ply, depth)
                 break
 
-        flag = 2 if best_score <= original_alpha else 1 if best_score >= beta else 0
+        flag = 2 if best_score <= original_alpha else 1 if best_score >= original_beta else 0
         self.table[key] = (depth, best_score, flag, best_move)
         return best_score, best_pv
 
@@ -183,6 +220,8 @@ class Searcher:
         root = board.copy()
         self.nodes = 0
         self.table.clear()
+        self.killers.clear()
+        self.history.clear()
         self.stop_event.clear()
         self.deadline = time.monotonic() + time_limit if time_limit is not None else None
         self.node_limit = node_limit
@@ -217,3 +256,13 @@ class Searcher:
         ponder = best_pv[1] if len(best_pv) > 1 else None
         return SearchResult(best_move, ponder, best_score, completed_depth,
                             self.nodes, elapsed, tuple(best_pv))
+
+
+PIECE_ORDER_VALUE = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+    chess.KING: 10,
+}
