@@ -86,7 +86,9 @@ class Searcher:
         if board.is_capture(move):
             victim = chess.PAWN if board.is_en_passant(move) else board.piece_type_at(move.to_square)
             attacker = board.piece_type_at(move.from_square)
-            return 100_000 + 10 * PIECE_ORDER_VALUE.get(victim, 0) - PIECE_ORDER_VALUE.get(attacker, 0)
+            victim_value = PIECE_ORDER_VALUE.get(victim, 0) if victim is not None else 0
+            attacker_value = PIECE_ORDER_VALUE.get(attacker, 0) if attacker is not None else 0
+            return 100_000 + 10 * victim_value - attacker_value
         killers = self.killers.get(ply, [])
         if killers and move == killers[0]:
             return 90_000
