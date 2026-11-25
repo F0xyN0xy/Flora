@@ -6,12 +6,77 @@ import random
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
 from flora.dataset import FloraDataset, list_dataset_chunks
 from flora.network import FloraNetwork
+
+ChunkSelection = tuple[Path, np.ndarray | None]
+
+
+def _split_chunks(
+    chunk_paths: list[Path], validation_fraction: float
+) -> tuple[list[ChunkSelection], list[ChunkSelection], str]:
+    """Split by whole games when game IDs exist; otherwise use legacy shard split."""
+    if validation_fraction <= 0:
+        return [(path, None) for path in chunk_paths], [], "disabled"
+
+    game_id_arrays: list[np.ndarray] = []
+    has_game_ids = True
+    for path in chunk_paths:
+        with np.load(path, allow_pickle=False) as data:
+            if "game_ids" not in data.files:
+                has_game_ids = False
+                break
+            game_id_arrays.append(data["game_ids"].astype(np.int64, copy=False))
+
+    if has_game_ids:
+        threshold = int(validation_fraction * 10_000)
+        if threshold < 1:
+            threshold = 1
+        training: list[ChunkSelection] = []
+        validation: list[ChunkSelection] = []
+        train_count = 0
+        validation_count = 0
+        for path, game_ids in zip(chunk_paths, game_id_arrays):
+            # A deterministic modulo assignment keeps every position from a game
+            # together, including games whose positions cross shard boundaries.
+            validation_mask = np.remainder(game_ids, 10_000) < threshold
+            validation_indices = np.flatnonzero(validation_mask)
+            training_indices = np.flatnonzero(~validation_mask)
+            if len(training_indices):
+                training.append((path, training_indices))
+                train_count += len(training_indices)
+            if len(validation_indices):
+                validation.append((path, validation_indices))
+                validation_count += len(validation_indices)
+
+        if train_count and validation_count:
+            return training, validation, "game-aware"
+        print(
+            "Warning: game IDs are present, but this dataset is too small for the "
+            "requested split; validation is disabled."
+        )
+        return [(path, None) for path in chunk_paths], [], "disabled"
+
+    if len(chunk_paths) >= 2:
+        split_at = max(1, int(len(chunk_paths) * (1.0 - validation_fraction)))
+        split_at = min(split_at, len(chunk_paths) - 1)
+        print(
+            "Warning: dataset has no game IDs; using legacy shard-based validation. "
+            "Re-import PGNs to enable game-aware validation."
+        )
+        return (
+            [(path, None) for path in chunk_paths[:split_at]],
+            [(path, None) for path in chunk_paths[split_at:]],
+            "shard-based",
+        )
+
+    print("Validation disabled: game IDs or at least two dataset shards are required.")
+    return [(path, None) for path in chunk_paths], [], "disabled"
 
 
 def _load_checkpoint(
@@ -42,19 +107,19 @@ def _load_checkpoint(
 
 def _mean_loss(
     network: FloraNetwork,
-    chunk_paths: list[Path],
+    selections: list[ChunkSelection],
     batch_size: int,
     device: str,
     policy_loss_fn: nn.KLDivLoss,
     value_loss_fn: nn.MSELoss,
 ) -> float:
-    """Evaluate a set of shards without retaining them all in memory."""
+    """Evaluate selected positions without retaining all shards in memory."""
     network.eval()
     total_loss = 0.0
     samples = 0
     with torch.inference_mode():
-        for chunk_path in chunk_paths:
-            dataset = FloraDataset(chunk_path)
+        for chunk_path, indices in selections:
+            dataset = FloraDataset(chunk_path, indices=indices)
             loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
             for positions, target_policy, target_value in loader:
                 positions = positions.to(device)
@@ -118,15 +183,12 @@ def train(
         raise ValueError("validation_fraction must be in the range [0, 0.5)")
 
     all_chunks = list_dataset_chunks(dataset_path)
-    validation_chunks: list[Path] = []
-    training_chunks = all_chunks
-    if Path(dataset_path).is_dir() and len(all_chunks) >= 2 and validation_fraction > 0:
-        split_at = max(1, int(len(all_chunks) * (1.0 - validation_fraction)))
-        split_at = min(split_at, len(all_chunks) - 1)
-        training_chunks = all_chunks[:split_at]
-        validation_chunks = all_chunks[split_at:]
-    elif validation_fraction > 0:
-        print("Validation disabled: a chunk directory with at least two shards is required.")
+    training_chunks, validation_chunks, split_mode = _split_chunks(
+        all_chunks, validation_fraction
+    )
+    if not training_chunks:
+        raise ValueError("Training split contains no positions")
+    print(f"Dataset split: {split_mode}", flush=True)
 
     network = FloraNetwork(channels=channels, residual_blocks=residual_blocks)
     network.to(device)
@@ -154,8 +216,8 @@ def train(
         rng.shuffle(epoch_chunks)
 
         # Only one shard is loaded at a time, bounding host RAM usage.
-        for chunk_path in epoch_chunks:
-            dataset = FloraDataset(chunk_path)
+        for chunk_path, indices in epoch_chunks:
+            dataset = FloraDataset(chunk_path, indices=indices)
             if not len(dataset):
                 continue
             loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
