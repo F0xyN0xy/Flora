@@ -47,8 +47,8 @@ def test_pgn_respects_game_and_ply_limits(tmp_path):
 def test_pgn_examples_retain_game_identity_across_positions_and_offsets(tmp_path):
     path = tmp_path / "games.pgn"
     path.write_text(
-        '[Event "One"]\\n[Result "1-0"]\\n\\n1. e4 e5 1-0\\n\\n'
-        '[Event "Two"]\\n[Result "0-1"]\\n\\n1. d4 d5 0-1\\n',
+        '[Event "One"]\n[Result "1-0"]\n\n1. e4 e5 1-0\n\n'
+        '[Event "Two"]\n[Result "0-1"]\n\n1. d4 d5 0-1\n',
         encoding="utf-8",
     )
     examples = pgn_to_examples(path)
