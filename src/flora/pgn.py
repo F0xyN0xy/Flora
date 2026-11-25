@@ -13,7 +13,7 @@ from flora.dataset import write_chunked_dataset
 from flora.encoding import MOVE_VOCABULARY_SIZE, encode_position, move_to_index
 
 
-Example = tuple[np.ndarray, np.ndarray, float]
+Example = tuple[np.ndarray, np.ndarray, float, int]
 
 
 def iter_pgn_examples(
@@ -22,12 +22,15 @@ def iter_pgn_examples(
     max_games: int | None = None,
     max_plies: int | None = None,
     include_draws: bool = True,
+    game_id_offset: int = 0,
 ) -> Iterator[Example]:
-    """Yield examples one position at a time; never retain all games in memory."""
+    """Yield positions with stable game IDs; never retain all games in memory."""
     if max_games is not None and max_games < 1:
         raise ValueError("max_games must be positive")
     if max_plies is not None and max_plies < 1:
         raise ValueError("max_plies must be positive")
+    if game_id_offset < 0:
+        raise ValueError("game_id_offset cannot be negative")
 
     games_read = 0
     with Path(pgn_path).open("r", encoding="utf-8-sig", errors="replace") as handle:
@@ -35,6 +38,7 @@ def iter_pgn_examples(
             game = chess.pgn.read_game(handle)
             if game is None:
                 break
+            game_id = game_id_offset + games_read
             games_read += 1
 
             result = game.headers.get("Result", "*")
@@ -54,7 +58,7 @@ def iter_pgn_examples(
                 policy = np.zeros(MOVE_VOCABULARY_SIZE, dtype=np.float32)
                 policy[move_to_index(move)] = 1.0
                 value = white_value if board.turn == chess.WHITE else -white_value
-                yield position, policy, value
+                yield position, policy, value, game_id
                 board.push(move)
 
 
@@ -85,6 +89,15 @@ def iter_input_files(input_path: Path) -> list[Path]:
     raise FileNotFoundError(f"Input does not exist: {input_path}")
 
 
+def count_pgn_games(file_path: Path) -> int:
+    """Count all PGN records, including unfinished games skipped for training."""
+    count = 0
+    with file_path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+        while chess.pgn.read_game(handle) is not None:
+            count += 1
+    return count
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stream PGN games into chunked Flora training data")
     parser.add_argument("--input", type=Path, required=True, help="PGN file or directory of PGN files")
@@ -96,28 +109,33 @@ def main() -> None:
     args = parser.parse_args()
     if args.chunk_size < 1:
         parser.error("--chunk-size must be positive")
+    if args.max_games is not None and args.max_games < 1:
+        parser.error("--max-games must be positive")
 
     try:
         files = iter_input_files(args.input)
         remaining = args.max_games
+        next_game_id = 0
 
         def examples() -> Iterator[Example]:
-            nonlocal remaining
+            nonlocal remaining, next_game_id
             for file_path in files:
                 if remaining is not None and remaining <= 0:
                     break
+                games_in_file = count_pgn_games(file_path)
+                limit = min(games_in_file, remaining) if remaining is not None else None
                 for example in iter_pgn_examples(
                     file_path,
-                    max_games=remaining,
+                    max_games=limit,
                     max_plies=args.max_plies,
                     include_draws=not args.exclude_draws,
+                    game_id_offset=next_game_id,
                 ):
                     yield example
+                processed = games_in_file if limit is None else limit
+                next_game_id += processed
                 if remaining is not None:
-                    # Count all records, including unfinished games skipped for training.
-                    with file_path.open("r", encoding="utf-8-sig", errors="replace") as handle:
-                        records = sum(1 for _ in iter(lambda: chess.pgn.read_game(handle), None))
-                    remaining -= min(records, remaining)
+                    remaining -= processed
 
         total, chunks = write_chunked_dataset(
             args.output, examples(), chunk_size=args.chunk_size

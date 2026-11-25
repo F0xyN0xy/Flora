@@ -44,3 +44,22 @@ def test_list_dataset_chunks_accepts_legacy_npz(tmp_path):
     path = tmp_path / "legacy.npz"
     save_examples(path, [_example(0)])
     assert list_dataset_chunks(path) == [path]
+
+
+def test_chunked_writer_preserves_game_ids_across_shards(tmp_path):
+    output = tmp_path / "game-aware"
+    examples = [
+        (_example(i)[0], _example(i)[1], 0.0, game_id)
+        for i, game_id in enumerate([10, 10, 11, 11, 12])
+    ]
+    total, chunks = write_chunked_dataset(output, examples, chunk_size=2)
+
+    assert (total, chunks) == (5, 3)
+    observed = []
+    for path in list_dataset_chunks(output):
+        with np.load(path, allow_pickle=False) as data:
+            observed.extend(data["game_ids"].tolist())
+    assert observed == [10, 10, 11, 11, 12]
+
+    dataset = FloraDataset(list_dataset_chunks(output)[0], indices=[1])
+    assert len(dataset) == 1
