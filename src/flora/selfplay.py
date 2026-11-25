@@ -1,17 +1,53 @@
-"""Generate self-play games and policy/value training examples."""
+"""Generate self-play games, training examples, and automatically saved PGNs."""
 from __future__ import annotations
+
 import argparse
 import random
 from pathlib import Path
+
 import chess
+import chess.pgn
 import numpy as np
 import torch
+
 from flora.dataset import save_examples
 from flora.encoding import MOVE_VOCABULARY_SIZE, encode_position, move_to_index
 from flora.mcts import MCTS
 from flora.network import FloraNetwork
 
-def play_game(network: torch.nn.Module, *, device: str = "cpu", simulations: int = 64, batch_size: int = 8, temperature_moves: int = 20, max_plies: int = 300, seed: int | None = None) -> list[tuple[np.ndarray, np.ndarray, float]]:
+
+def append_pgn(path: str | Path, board: chess.Board, *, game_number: int) -> None:
+    """Append a completed or ply-capped game to a PGN file."""
+    outcome = board.outcome(claim_draw=True)
+    result = "*" if outcome is None else outcome.result()
+    game = chess.pgn.Game.from_board(board)
+    game.headers["Event"] = "Flora Self-Play"
+    game.headers["Site"] = "Local"
+    game.headers["Round"] = str(game_number)
+    game.headers["White"] = "Flora"
+    game.headers["Black"] = "Flora"
+    game.headers["Result"] = result
+    if outcome is None:
+        game.headers["Termination"] = "Ply limit reached; game is unfinished"
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("a", encoding="utf-8") as handle:
+        game.accept(chess.pgn.FileExporter(handle))
+        handle.write("\n\n")
+
+
+def play_game(
+    network: torch.nn.Module,
+    *,
+    device: str = "cpu",
+    simulations: int = 64,
+    batch_size: int = 8,
+    temperature_moves: int = 20,
+    max_plies: int = 300,
+    seed: int | None = None,
+    pgn_output: str | Path | None = None,
+    game_number: int = 1,
+) -> list[tuple[np.ndarray, np.ndarray, float]]:
     """Play one self-play game; values are from each stored position's side-to-move view."""
     if simulations < 1 or batch_size < 1 or max_plies < 1:
         raise ValueError("simulations, batch_size and max_plies must be positive")
@@ -34,14 +70,19 @@ def play_game(network: torch.nn.Module, *, device: str = "cpu", simulations: int
         weights = [result.visit_counts[move] for move in moves]
         move = rng.choices(moves, weights=weights, k=1)[0] if board.ply() < temperature_moves and sum(weights) else result.best_move
         board.push(move)
+
     outcome = board.outcome(claim_draw=True)
     white_value = 0.0 if outcome is None or outcome.winner is None else (1.0 if outcome.winner == chess.WHITE else -1.0)
+    if pgn_output is not None:
+        append_pgn(pgn_output, board, game_number=game_number)
     return [(pos, policy, white_value if turn == chess.WHITE else -white_value) for pos, policy, turn in recorded]
 
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate Flora self-play training data")
+    parser = argparse.ArgumentParser(description="Generate Flora self-play training data and PGNs")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--output", type=Path, default=Path("data/selfplay.npz"))
+    parser.add_argument("--pgn-output", type=Path, default=Path("data/selfplay_games.pgn"))
     parser.add_argument("--games", type=int, default=2)
     parser.add_argument("--simulations", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -58,15 +99,26 @@ def main() -> None:
     if args.checkpoint:
         network.load_state_dict(torch.load(args.checkpoint, map_location="cpu", weights_only=True))
     network.to(device)
+
     examples = []
     for index in range(args.games):
-        game = play_game(network, device=device, simulations=args.simulations, batch_size=args.batch_size, max_plies=args.max_plies, seed=args.seed + index)
+        game = play_game(
+            network,
+            device=device,
+            simulations=args.simulations,
+            batch_size=args.batch_size,
+            max_plies=args.max_plies,
+            seed=args.seed + index,
+            pgn_output=args.pgn_output,
+            game_number=index + 1,
+        )
         examples.extend(game)
-        print(f"Game {index + 1}/{args.games}: {len(game)} positions")
+        print(f"Game {index + 1}/{args.games}: {len(game)} positions; PGN saved to {args.pgn_output}")
     if not examples:
         parser.error("No positions generated")
     save_examples(args.output, examples)
     print(f"Saved {len(examples)} positions to {args.output}")
+
 
 if __name__ == "__main__":
     main()
