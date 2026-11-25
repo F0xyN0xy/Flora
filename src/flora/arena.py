@@ -93,7 +93,7 @@ def main() -> None:
     device = "cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu"
     network = load_network(args.checkpoint, device)
 
-    engine = chess.engine.SimpleEngine.popen_uci(str(args.opponent))
+    engine = chess.engine.SimpleEngine.popen_uci([str(args.opponent)])
     try:
         print(f"Opponent: {engine.id.get('name', args.opponent.name)}")
         for index in range(args.games):
