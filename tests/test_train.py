@@ -24,7 +24,7 @@ def test_training_saves_resumable_checkpoint(tmp_path):
         epochs=1,
         batch_size=1,
         device="cpu",
-        channels=4,
+        channels=8,
         residual_blocks=1,
         validation_fraction=0.0,
     )
@@ -41,7 +41,7 @@ def test_training_saves_resumable_checkpoint(tmp_path):
         epochs=1,
         batch_size=1,
         device="cpu",
-        channels=4,
+        channels=8,
         residual_blocks=1,
         checkpoint_path=checkpoint_path,
         validation_fraction=0.0,
