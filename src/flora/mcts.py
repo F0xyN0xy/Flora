@@ -151,5 +151,5 @@ class MCTS:
             completed += target
 
         visit_counts = {move: child.visits for move, child in root.children.items()}
-        best_move = max(visit_counts, key=visit_counts.get)
+        best_move = max(visit_counts, key=lambda move: visit_counts[move])
         return SearchResult(best_move, visit_counts, root.value)
