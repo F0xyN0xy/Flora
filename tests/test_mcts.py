@@ -17,6 +17,7 @@ def test_search_returns_a_legal_move_and_counts_all_simulations():
     board = chess.Board()
     result = MCTS(UniformNetwork()).search(board, simulations=12)
 
+    assert result.best_move is not None
     assert result.best_move in board.legal_moves
     assert sum(result.visit_counts.values()) == 12
     assert set(result.visit_counts) == set(board.legal_moves)

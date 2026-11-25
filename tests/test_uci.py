@@ -25,7 +25,9 @@ def test_go_depth_emits_uci_bestmove(capsys):
     engine = UCIEngine()
     engine.handle("position startpos")
     engine.handle("go depth 1")
-    engine.worker.join(timeout=10)
+    worker = engine.worker
+    assert worker is not None
+    worker.join(timeout=10)
     output = capsys.readouterr().out
     assert "info depth 1" in output
     assert "bestmove " in output

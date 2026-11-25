@@ -14,6 +14,7 @@ class RecordingNetwork(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.batch_sizes = []
+
     def forward(self, positions):
         self.batch_sizes.append(len(positions))
         return (
@@ -26,6 +27,7 @@ def test_batched_mcts_returns_legal_move_and_all_visits():
     network = RecordingNetwork()
     board = chess.Board()
     result = MCTS(network).search(board, simulations=12, batch_size=4)
+    assert result.best_move is not None
     assert result.best_move in board.legal_moves
     assert sum(result.visit_counts.values()) == 12
     assert max(network.batch_sizes) > 1

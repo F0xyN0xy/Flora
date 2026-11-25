@@ -42,3 +42,20 @@ def test_pgn_respects_game_and_ply_limits(tmp_path):
     )
     examples = pgn_to_examples(path, max_games=1, max_plies=1)
     assert len(examples) == 1
+
+
+def test_pgn_examples_retain_game_identity_across_positions_and_offsets(tmp_path):
+    path = tmp_path / "games.pgn"
+    path.write_text(
+        '[Event "One"]\n[Result "1-0"]\n\n1. e4 e5 1-0\n\n'
+        '[Event "Two"]\n[Result "0-1"]\n\n1. d4 d5 0-1\n',
+        encoding="utf-8",
+    )
+    examples = pgn_to_examples(path)
+    assert [item[3] for item in examples] == [0, 0, 1, 1]
+
+    from flora.pgn import iter_pgn_examples
+
+    offset_examples = list(iter_pgn_examples(path, max_games=1, game_id_offset=12))
+    assert offset_examples
+    assert {item[3] for item in offset_examples} == {12}

@@ -53,7 +53,7 @@ Place one or more `.pgn` files in a folder, or provide a single PGN file:
 python -m flora.pgn --input data/pgn --output data/pgn_training --chunk-size 256
 ```
 
-The importer reads one game at a time and writes a shard after every 256 positions by default. It does not retain the entire PGN collection or all training examples in RAM. Choose a new or empty output directory; the importer deliberately refuses to overwrite existing chunk files.
+The importer reads one game at a time, records a stable game ID with every position, and writes a shard after every 256 positions by default. Game IDs are preserved even when one game spans multiple shards. It does not retain the entire PGN collection or all training examples in RAM. Choose a new or empty output directory; the importer deliberately refuses to overwrite existing chunk files.
 
 For a small test:
 
@@ -65,7 +65,7 @@ Only games with a known result (`1-0`, `0-1`, or `1/2-1/2`) are included. The pl
 
 ## Train a network
 
-The trainer accepts either a legacy single NPZ file or a chunked dataset directory. With chunked data, it loads one shard at a time:
+The trainer accepts either a legacy single NPZ file or a chunked dataset directory. New PGN-imported datasets use game-aware validation: all positions from a given game are assigned to either training or validation, never both. Older datasets without game IDs remain readable, but fall back to shard-based validation with a warning; re-import the PGNs to get game-aware validation. With chunked data, it loads one shard at a time:
 
 ```powershell
 python -m flora.train --data data/pgn_training --epochs 5 --batch-size 32 --device cuda --output checkpoints/flora.pt
@@ -77,7 +77,7 @@ To initialize from an existing Flora model and fine-tune its weights:
 python -m flora.train --data data/pgn_training --checkpoint checkpoints/previous.pt --epochs 5 --device cuda --output checkpoints/flora_finetuned.pt
 ```
 
-This resumes model weights, but currently starts a fresh optimizer; optimizer state and training epoch are not resumed. RAM use is bounded by the largest individual shard, not the entire dataset.
+Training checkpoints preserve model weights, optimizer state, completed epoch, loss history, and best validation loss. Use `--checkpoint` to resume for the requested number of additional epochs. RAM use is bounded by the largest individual shard, not the entire dataset.
 
 ## Play against another UCI engine
 

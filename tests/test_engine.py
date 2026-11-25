@@ -7,6 +7,7 @@ def test_search_returns_a_legal_move_and_does_not_mutate_board():
     board = chess.Board()
     before = board.fen()
     result = Searcher().search(board, max_depth=2)
+    assert result.best_move is not None
     assert result.best_move in board.legal_moves
     assert board.fen() == before
     assert result.depth == 2
@@ -17,6 +18,7 @@ def test_search_returns_a_legal_move_and_does_not_mutate_board():
 def test_search_finds_mate_in_one():
     board = chess.Board("7k/6pp/5KQ1/8/8/8/8/8 w - - 0 1")
     result = Searcher().search(board, max_depth=3)
+    assert result.best_move is not None
     assert result.best_move in board.legal_moves
     after = board.copy()
     after.push(result.best_move)
