@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import random
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import nn
@@ -13,11 +14,88 @@ from flora.dataset import FloraDataset, list_dataset_chunks
 from flora.network import FloraNetwork
 
 
-def load_weights(network: FloraNetwork, checkpoint_path: str | Path) -> None:
-    """Load either a raw state_dict or a checkpoint containing model_state_dict."""
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+def _load_checkpoint(
+    network: FloraNetwork,
+    checkpoint_path: str | Path,
+    optimizer: torch.optim.Optimizer | None = None,
+) -> tuple[int, list[float], float]:
+    """Load model weights and, when available, optimizer/training state."""
+    checkpoint: Any = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=True
+    )
+    if not isinstance(checkpoint, dict):
+        network.load_state_dict(checkpoint)
+        return 0, [], float("inf")
+
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
     network.load_state_dict(state_dict)
+
+    if optimizer is not None and "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    return (
+        int(checkpoint.get("epoch", 0)),
+        list(checkpoint.get("history", [])),
+        float(checkpoint.get("best_validation_loss", float("inf"))),
+    )
+
+
+def _mean_loss(
+    network: FloraNetwork,
+    chunk_paths: list[Path],
+    batch_size: int,
+    device: str,
+    policy_loss_fn: nn.KLDivLoss,
+    value_loss_fn: nn.MSELoss,
+) -> float:
+    """Evaluate a set of shards without retaining them all in memory."""
+    network.eval()
+    total_loss = 0.0
+    samples = 0
+    with torch.inference_mode():
+        for chunk_path in chunk_paths:
+            dataset = FloraDataset(chunk_path)
+            loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+            for positions, target_policy, target_value in loader:
+                positions = positions.to(device)
+                target_policy = target_policy.to(device)
+                target_value = target_value.to(device)
+                logits, values = network(positions)
+                loss = (
+                    policy_loss_fn(torch.log_softmax(logits, dim=1), target_policy)
+                    + value_loss_fn(values, target_value)
+                )
+                count = len(positions)
+                total_loss += float(loss) * count
+                samples += count
+            del loader, dataset
+    return total_loss / samples if samples else float("nan")
+
+
+def _save_checkpoint(
+    output_path: str | Path,
+    network: FloraNetwork,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    history: list[float],
+    best_validation_loss: float,
+) -> None:
+    """Write a resumable checkpoint after each completed epoch."""
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    torch.save(
+        {
+            "format_version": 1,
+            "epoch": epoch,
+            "model_state_dict": network.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "history": history,
+            "best_validation_loss": best_validation_loss,
+        },
+        temporary,
+    )
+    temporary.replace(destination)
 
 
 def train(
@@ -32,29 +110,50 @@ def train(
     residual_blocks: int = 4,
     checkpoint_path: str | Path | None = None,
     seed: int = 1,
+    validation_fraction: float = 0.05,
 ) -> list[float]:
     if epochs < 1 or batch_size < 1 or learning_rate <= 0:
         raise ValueError("epochs, batch_size and learning_rate must be positive")
-    chunk_paths = list_dataset_chunks(dataset_path)
-    network = FloraNetwork(channels=channels, residual_blocks=residual_blocks)
-    if checkpoint_path is not None:
-        load_weights(network, checkpoint_path)
-    network.to(device)
+    if not 0.0 <= validation_fraction < 0.5:
+        raise ValueError("validation_fraction must be in the range [0, 0.5)")
 
+    all_chunks = list_dataset_chunks(dataset_path)
+    validation_chunks: list[Path] = []
+    training_chunks = all_chunks
+    if Path(dataset_path).is_dir() and len(all_chunks) >= 2 and validation_fraction > 0:
+        split_at = max(1, int(len(all_chunks) * (1.0 - validation_fraction)))
+        split_at = min(split_at, len(all_chunks) - 1)
+        training_chunks = all_chunks[:split_at]
+        validation_chunks = all_chunks[split_at:]
+    elif validation_fraction > 0:
+        print("Validation disabled: a chunk directory with at least two shards is required.")
+
+    network = FloraNetwork(channels=channels, residual_blocks=residual_blocks)
+    network.to(device)
     optimizer = torch.optim.AdamW(network.parameters(), lr=learning_rate)
+
+    start_epoch = 0
+    history: list[float] = []
+    best_validation_loss = float("inf")
+    if checkpoint_path is not None:
+        start_epoch, history, best_validation_loss = _load_checkpoint(
+            network, checkpoint_path, optimizer
+        )
+        print(f"Resumed from epoch {start_epoch}: {checkpoint_path}")
+
     policy_loss_fn = nn.KLDivLoss(reduction="batchmean")
     value_loss_fn = nn.MSELoss()
-    history: list[float] = []
     rng = random.Random(seed)
 
-    for epoch in range(epochs):
+    for epoch_offset in range(epochs):
+        epoch_number = start_epoch + epoch_offset + 1
         network.train()
         total_loss = 0.0
         samples = 0
-        epoch_chunks = list(chunk_paths)
+        epoch_chunks = list(training_chunks)
         rng.shuffle(epoch_chunks)
 
-        # Load only one shard at a time. This bounds host RAM usage by chunk size.
+        # Only one shard is loaded at a time, bounding host RAM usage.
         for chunk_path in epoch_chunks:
             dataset = FloraDataset(chunk_path)
             if not len(dataset):
@@ -66,26 +165,52 @@ def train(
                 target_value = target_value.to(device)
                 optimizer.zero_grad(set_to_none=True)
                 logits, values = network(positions)
-                policy_loss = policy_loss_fn(torch.log_softmax(logits, dim=1), target_policy)
+                policy_loss = policy_loss_fn(
+                    torch.log_softmax(logits, dim=1), target_policy
+                )
                 value_loss = value_loss_fn(values, target_value)
                 loss = policy_loss + value_loss
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(network.parameters(), 1.0)
                 optimizer.step()
-                total_loss += float(loss.detach()) * len(positions)
-                samples += len(positions)
+                count = len(positions)
+                total_loss += float(loss.detach()) * count
+                samples += count
             del loader, dataset
 
         if not samples:
             raise ValueError("Dataset contains no training examples")
         mean_loss = total_loss / samples
         history.append(mean_loss)
-        print(f"Epoch {epoch + 1}/{epochs}: loss={mean_loss:.5f} ({samples} positions)")
+        message = (
+            f"Epoch {epoch_number}/{start_epoch + epochs}: "
+            f"loss={mean_loss:.5f} ({samples} positions)"
+        )
 
-    destination = Path(output_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(network.state_dict(), destination)
-    print(f"Saved checkpoint to {destination}")
+        if validation_chunks:
+            validation_loss = _mean_loss(
+                network,
+                validation_chunks,
+                batch_size,
+                device,
+                policy_loss_fn,
+                value_loss_fn,
+            )
+            message += f" val_loss={validation_loss:.5f}"
+            if validation_loss < best_validation_loss:
+                best_validation_loss = validation_loss
+
+        print(message, flush=True)
+        _save_checkpoint(
+            output_path,
+            network,
+            optimizer,
+            epoch_number,
+            history,
+            best_validation_loss,
+        )
+        print(f"Checkpoint saved to {output_path}", flush=True)
+
     return history
 
 
@@ -93,10 +218,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train Flora from PGN or self-play data")
     parser.add_argument("--data", type=Path, required=True, help="NPZ file or chunked dataset directory")
     parser.add_argument("--output", type=Path, default=Path("checkpoints/flora.pt"))
-    parser.add_argument("--checkpoint", type=Path, help="Initialize from an existing model checkpoint")
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--checkpoint", type=Path, help="Resume from a model/training checkpoint")
+    parser.add_argument("--epochs", type=int, default=5, help="Number of additional epochs to train")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--validation-fraction", type=float, default=0.05)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
@@ -114,6 +240,7 @@ def main() -> None:
         device=device,
         checkpoint_path=args.checkpoint,
         seed=args.seed,
+        validation_fraction=args.validation_fraction,
     )
 
 
