@@ -44,7 +44,8 @@ def _split_chunks(
         for path, game_ids in zip(chunk_paths, game_id_arrays):
             # A deterministic modulo assignment keeps every position from a game
             # together, including games whose positions cross shard boundaries.
-            validation_bucket = np.remainder(game_ids * 7_919 + 104_729, 10_000)\n            validation_mask = validation_bucket < threshold
+            validation_bucket = np.remainder(game_ids * 7_919 + 104_729, 10_000)
+            validation_mask = validation_bucket < threshold
             validation_indices = np.flatnonzero(validation_mask)
             training_indices = np.flatnonzero(~validation_mask)
             if len(training_indices):
