@@ -18,7 +18,7 @@ training = ["torch>=2.5"]
 flora-uci = "flora.uci:main"
 flora-selfplay = "flora.selfplay:main"
 flora-train = "flora.train:main"
-flora-pgn = "flora.pgn:main"
+flora-pgn = "flora.pgn:main"\nflora-arena = "flora.arena:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
